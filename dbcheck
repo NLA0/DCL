@@ -1,0 +1,113 @@
+$ ! Very fast check the health of a RDB database
+$ ! List of checks:
+$ ! -- check for extents of areas and snaps
+$ ! -- check for AIJ extend
+$ ! -- check for AIJ enabled
+$ ! TODO: - aij EXISTS and accessible
+$ !       - last disk , dir on AIJ directory
+$ !
+$ dsp := write sys$output
+$ IF P1 .EQS. ""
+$     THEN dsp "P1: Datenbase name is mandatory"
+$          goto unhappyend
+$     ELSE db = P1
+$ ENDIF
+$ IF f$search("''db'") .EQS. ""
+$    THEN dsp "Database ''db' does not exist."
+$    GOTO unhappyend
+$ ENDIF
+$ RMU/SHOW VERSION 'db /OUTPUT=NL:
+$ IF ( RMU$DATABASE_VERSION .NES. RMU$RDB_VERSION )
+$    THEN DEFINE/NOLOG SYS$OUTPUT NL:
+$         @SYS$LIBRARY:RDB$SETVER.COM 'RMU$DATABASE_VERSION'
+$         DEASS SYS$OUTPUT
+$ ENDIF
+$ !
+$ ! "-------------generating the header info used by all checks----------"
+$ !
+$ pid = f$getjpis("","pid")
+$ infile = "sys$scratch:''pid'.tmp"
+$ rmu/dump/head 'db' /output='infile'
+$ !
+$ dsp "--------------check for extents of areas and snaps-----------------"
+$ ! Check if single file database
+$ search 'infile'  "Filename is",".RDA"/match=and/EXACT
+$ IF  $severity  .NES. 1
+$   THEN dsp "This is a single-file database"
+$     search/nohigh/exact 'infile' "Storage area","has been extended"/EXACT/out=searext.tmp
+$   ELSE search/nohigh/exact 'infile' "Filename is","has been extended"/EXACT/out=searext.tmp
+$ ENDIF
+$ search searext.tmp  "has been extended"/win=(1,0)
+$ delete/nolog/noconf searext.tmp;*
+$ !
+$ dsp "--------------check for AIJ enabled and accessible-----------------"
+$ search 'infile' "Filename is","AIJ"/match=and/EXACT
+$ !
+$ pipe search 'infile' "After-image journaling is enabled"/nowarn ; stataij = $severity
+$ IF stataij .NE. 1
+$    THEN dsp ">>>>>>>>>>>AIJ is NOT enabled<<<<<<<<<<<"
+$         goto endaijextend
+$ ENDIF
+$ pipe search 'infile' "All journals are accessible" /nowarn ; stataij = $severity
+$ IF stataij .NE. 1
+$    THEN dsp ">>>>>>>>>>>AIJ is NOT accessible<<<<<<<<<<<"
+$         goto endaijextend
+$ ENDIF
+$ENDDISK:
+$ IF f$search("filenam.tmp") .NES. "" THEN delete/noconfirm/nolog filenam.tmp;*
+$ !
+$ dsp "-------------check for AIJ extensions------------------------------"
+$ ! Daily extension of AIJ can be very penalizing for IO, because AIJ is initialized after backup
+$ !
+$ pipe search 'infile' "Allocation is defaulted to"/exac/out=allo.tmp/nowa ; sevallo = $severity
+$        placeinstring = 4
+$ ! In case allocation was set to different than default :
+$ IF sevallo .NE. 1
+$    THEN -
+pipe search 'infile' "Allocation is"/exac/out=allo.tmp/nowa ; sevallo = $severity
+$        placeinstring = 2
+$ ENDIF
+$ IF sevallo .NE. 1
+$    THEN dsp ">>>>>>>>>Cannot find default allocation for AIJ<<<<<<<<"
+$         GOTO endallo
+$ ENDIF
+$ open/read allo allo.tmp
+$ search 'infile' "Current journal size is"/exac/out=curraij.tmp/nowa
+$ open/read curraij curraij.tmp
+$ aijnr = 0
+$reallo:
+$ aijnr = aijnr + 1
+$ read/end=endallo allo lineallo
+$ lineallo = f$edit(lineallo,"TRIM,COMPRESS")
+$ IF placeinstring .EQ. 2
+$    THEN  alloaij = f$element(2," ",lineallo)
+$    ELSE  alloaij = f$element(4," ",lineallo)
+$ ENDIF
+$ alloaij = f$integer(alloaij)
+$ read/end=endallo curraij linecurr
+$ linecurr = f$edit(linecurr,"TRIM,COMPRESS")
+$ aijsize  = f$element(4," ",linecurr)
+$ aijsize = f$integer(aijsize)
+$ goto reallo ! read again, in case multiple AIJ files (circulary)
+$endallo:
+$ IF f$trnlnm("allo") .NES. "" THEN close allo
+$ IF f$search("allo.tmp") .NES. "" THEN delete /nolog/noconf  allo.tmp;*
+$ IF f$trnlnm("curraij") .NES. "" THEN close curraij
+$ IF f$search("curraij.tmp") .NES. "" THEN delete /nolog/noconf  curraij.tmp;*
+$ aijcompare = alloaij + 512 ! only react for bigger extension number
+$ IF aijcompare .LT. aijsize
+$    THEN dsp ">>>>>>>>>AIJ extended from ''alloaij' to ''aijsize'<<<<<<<<<"
+$    ELSE dsp "AIJ did not extend, current: ''aijsize', initial allocated: ''alloaij'"
+$ ENDIF
+$ IF f$search("allo.tmp") .NES. "" THEN delete /nolog/noconf  allo.tmp;*
+$ IF f$search("aij_expanded.txt") .NES. "" THEN pur/nolog/noconf aij_expanded.txt
+$ IF f$search("curraij.tmp") .NES. "" THEN delete /nolog/noconf  curraij.tmp;*
+$endaijextend:
+$ !---------------insert any other check before this line-----------------------
+$ goto happyend
+$unhappyend:
+$ dsp "Better luck next time !"
+$happyend:
+$ IF f$search("''infile'") .NES. "" THEN delete/nolog/noconf 'infile';*
+$ dsp "---------------------END of DB quick checks-------------------------------"
+$ exit
